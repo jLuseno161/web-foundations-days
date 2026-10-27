@@ -1,131 +1,100 @@
 # TicketHub Design
-
-TicketHub is a website that sells tickets for concerts and events.
-
+ 
 ## 1. Requirements
-
-### Functional
-- Users can register, log in and browse or search events.
-- Users can view an event's seat map with live availability.
-- Users can hold seats for a short time (5 minutes) while they pay.
-- Users can pay and receive tickets, and view their tickets later.
-- Users can release a hold, and expired holds free their seats automatically.
-
-### Non-functional
-- **Speed:** event pages load in under 1 second and the seat map in under 500 ms, even during a big sale.
-- **Correctness:** a seat is never sold twice, and a user is never charged without getting a ticket. Payments must be safe to retry.
-- **Fairness:** first come, first served. Bots and one person grabbing hundreds of seats are limited, and everyone gets a quick, honest answer when seats run out.
-- **Availability:** the site stays up during a big sale.
-- **Security:** card details are handled only by the payment provider.
-
+ 
+**Functional:** register and log in; browse and search events; view a seat map with live availability; hold seats for 5 minutes; pay and receive tickets; view my tickets.
+ 
+**Non-functional:**
+- **Speed:** pages under 1 s and the seat map under 500 ms, even in a big sale.
+- **Correctness:** a seat is never sold twice, nobody is charged without a ticket, and payments are safe to retry.
+- **Fairness:** first come, first served; bots and bulk buying are limited; "sold out" is answered quickly and honestly.
+- **Availability and security:** the site stays up during a sale, and card data is handled only by the payment provider.
 ## 2. Estimates
-
-**Facts:** 2,000,000 registered users; 50,000 visitors a day, each viewing 10 pages; 5,000 tickets sold a day. A big sale has 200,000 buyers for 20,000 seats in the first 10 minutes (600 seconds).
-
-**Assumptions:** 86,400 seconds in a day; normal peak = 5× the average; in the sale each buyer makes about 10 requests (event page, seat map refreshes, holds, payment) and about 3 hold attempts, because seats get taken while they choose.
-
-| Measure | Normal day | Big sale (10 minutes) |
+ 
+Assumptions: 86,400 s per day; normal peak = 5x average; in the sale each buyer makes about 10 requests and 3 hold attempts.
+ 
+| Measure | Normal day | Big sale (600 s) |
 |---|---|---|
-| Page views / requests per second | 500,000 ÷ 86,400 ≈ **6/s** average, ≈ 30/s peak | 200,000 × 10 ÷ 600 ≈ **3,300/s** |
-| Purchases per second | 5,000 ÷ 86,400 ≈ **0.06/s** (one every 17 s) | 20,000 ÷ 600 ≈ **33/s** |
-| Seat-hold attempts per second | negligible | 200,000 × 3 ÷ 600 ≈ **1,000/s** |
-| Storage per year | 5,000 × 365 ≈ 1.8 million orders ≈ 2 GB | negligible |
-
-**Comparison:** the big sale is about **570 times** busier than a normal day (3,300 vs 6 requests per second), and it is a sudden spike on one event, not a gradual rise. Also, only 10% of the 200,000 buyers can get a seat, so the system must answer "sold out" quickly and cheaply for the other 180,000. The size of the data is small, so the challenge is **concurrency**, not storage.
-
+| Requests per second | 50,000 x 10 / 86,400 = 6 (peak 30) | 200,000 x 10 / 600 = 3,300 |
+| Purchases per second | 5,000 / 86,400 = 0.06 | 20,000 / 600 = 33 |
+| Hold attempts per second | about 0 | 200,000 x 3 / 600 = 1,000 |
+ 
+**Comparison:** the sale is about 570x busier than a normal day, it hits one event, and 90% of buyers get no seat. Storage is small (about 2 GB of orders a year), so the problem is concurrency, not data size.
+ 
 ## 3. API
-
-Base path `/v1`. All endpoints except login need a token, and `POST /orders` needs an `Idempotency-Key` header.
-
-| Method | Path | Description | Success |
+ 
+| Method | Path | Purpose | Success |
 |---|---|---|---|
-| `POST` | `/auth/login` | Log in and get a token | `200` |
-| `GET` | `/events?q=&page=` | Browse or search events | `200` |
-| `GET` | `/events/{id}` | Event details | `200` |
-| `GET` | `/events/{id}/seats` | Seat map with availability | `200` |
-| `POST` | `/events/{id}/holds` | Hold seats for 5 minutes | `201` |
-| `DELETE` | `/holds/{id}` | Release a hold | `204` |
-| `POST` | `/orders` | Pay for a hold and get tickets | `201` |
-| `GET` | `/me/tickets` | View my tickets | `200` |
-
-**Hold request** `POST /events/7/holds`: `{ "seatIds": [101, 102] }`. **Response `201`:** `{ "holdId": 55, "expiresAt": "2026-11-01T18:05:00Z" }`.
-
-**Errors:** `400` invalid input (such as more than 4 seats), `401` not logged in, `404` unknown event, `409` **seat already taken** (`{ "error": "SEAT_UNAVAILABLE", "seatIds": [102] }`), `429` too many requests, `402` payment failed.
-
+| GET | /events | Browse and search events | 200 |
+| GET | /events/{id}/seats | Seat map with availability | 200 |
+| POST | /events/{id}/holds | Hold seats for 5 min, body `{"seatIds":[101,102]}` | 201 |
+| DELETE | /holds/{id} | Release a hold | 204 |
+| POST | /orders | Pay for a hold (Idempotency-Key header) | 201 |
+| GET | /me/tickets | View my tickets | 200 |
+ 
+Errors: 400 invalid input, 401 not logged in, 402 payment failed, 404 unknown event, 409 seat already taken, 429 too many requests.
+ 
 ## 4. Data model
-
-- **users:** `user_id` (PK), `name`, `email` (UNIQUE), `password_hash`, `created_at`
-- **events:** `event_id` (PK), `name`, `venue`, `starts_at`, `on_sale_at`
-- **seats:** `seat_id` (PK), `event_id` (FK to events), `section`, `row_label`, `seat_number`, `price`, `status` (`available`, `held` or `sold`), `held_by` (FK to users, can be empty), `hold_expires_at`. `UNIQUE (event_id, section, row_label, seat_number)`.
-- **orders:** `order_id` (PK), `user_id` (FK to users), `event_id` (FK to events), `total_amount`, `status`, `payment_ref` (UNIQUE), `created_at`
-- **tickets:** `ticket_id` (PK), `order_id` (FK to orders), `seat_id` (FK to seats, **UNIQUE**)
-
-**Relationships:** one user has many orders; one event has many seats and many orders; one order has many tickets (one per seat); each seat has at most one ticket. Users and events are linked many-to-many through orders.
-
-## 5. How double-booking is prevented
-
-Two people clicking the same seat at the same moment is the main correctness risk. Several layers stop it:
-
-1. **One source of truth.** The seat's status lives in the primary database. The cache is never used to decide who gets a seat.
-2. **Atomic conditional update.** A hold is one statement, not a "check, then update" in the app, which would let two requests both see "available":
-
+ 
+- **users** (user_id PK, name, email UNIQUE, password_hash)
+- **events** (event_id PK, name, venue, starts_at)
+- **seats** (seat_id PK, event_id FK, section, row_label, seat_number, price, status, held_by FK, hold_expires_at); UNIQUE (event_id, section, row_label, seat_number)
+- **orders** (order_id PK, user_id FK, event_id FK, total_amount, status, payment_ref UNIQUE)
+- **tickets** (ticket_id PK, order_id FK, seat_id FK UNIQUE)
+Relationships: one user has many orders; one event has many seats and orders; one order has many tickets; each seat has at most one ticket.
+ 
+## 5. Preventing double-booking
+ 
+1. Seat status lives only in the primary database; the cache never decides who gets a seat.
+2. A hold is one atomic conditional update, not "check, then update":
 ```sql
-UPDATE seats
-SET status = 'held', held_by = :user_id, hold_expires_at = :now_plus_5_min
-WHERE seat_id = :seat_id
+UPDATE seats SET status = 'held', held_by = :user, hold_expires_at = :now_plus_5min
+WHERE seat_id = :seat
   AND (status = 'available' OR (status = 'held' AND hold_expires_at < :now));
 ```
-
-   The database locks the row while updating, so concurrent requests run one after the other. The second request finds the seat already held, updates **0 rows**, and the app returns `409`.
-3. **Transaction.** Holding several seats, and later paying, each run in one transaction (`BEGIN ... COMMIT`). If any seat fails, everything rolls back, so a user never gets half of their seats.
-4. **Constraint as a safety net.** `tickets.seat_id` is **UNIQUE**. Even if an application bug let two buyers reach the final step, the second `INSERT` fails and its transaction is rolled back. The database refuses to create two tickets for one seat.
-5. **Checks at payment.** Before creating the order, the transaction confirms the hold belongs to this user and has not expired, then marks the seats `sold` and inserts the tickets. A background worker also frees expired holds, but correctness does not depend on it because step 2 treats an expired hold as available.
-6. **Safe retries.** `payment_ref` is UNIQUE and `POST /orders` uses an idempotency key, so a double-click or network retry cannot create two orders or charge twice.
-
+ 
+The database locks the row, so concurrent requests run one at a time. The loser updates 0 rows and gets a 409. Expired holds count as available, so correctness does not depend on a cleanup job.
+3. Holding and paying each run in one transaction; if any seat fails, everything rolls back.
+4. `tickets.seat_id` is UNIQUE, so even if a bug let two buyers reach the end, the second INSERT fails and rolls back.
+5. `payment_ref` is UNIQUE and orders use an idempotency key, so retries cannot create two orders or charges.
+ 
 ## 6. Architecture
-
+ 
 ```
 Users
   |
   v
-[CDN]  static files and event pages
+[CDN]  static files, event pages
   |
   v
-[Waiting room]  admits buyers at a controlled rate
+[Waiting room]  admits buyers at a safe rate
   |
   v
 [Load balancer]
   |
   v
-[App servers 1..N]  (extra servers added for a sale)
+[App servers 1..N]  (scaled up for a sale)
   |        |         |            |
-  |        |         |            +--> [Payment provider]  (external)
-  |        |         +--> [Queue] --> [Workers]  (tickets, emails, free expired holds)
-  |        +--> [Primary database]  (seats, orders) --> [Read replica]  (browsing)
-  +--> [Cache (Redis)]  (event pages, seat map snapshot, rate limits)
+  |        |         |            +--> [Payment provider] (external)
+  |        |         +--> [Queue] --> [Workers]
+  |        +--> [Primary DB] --> [Read replica]
+  +--> [Cache (Redis)]
 ```
-
-- **CDN:** Serves images, scripts and public event pages from servers near users, so most traffic never reaches our servers.
-- **Waiting room:** Lets buyers into the sale at a rate the system can handle, which keeps the sale fair and prevents a crash.
-- **Load balancer:** Spreads requests across the app servers and avoids any that fail.
-- **App servers:** Run the API and business rules, and being stateless, more can be added quickly for a sale.
-- **Cache (Redis):** Holds the seat map for 1 to 2 seconds and counts requests per user, so thousands of identical reads become one database read.
-- **Primary database:** Holds the seats and orders and applies the locks and constraints that stop double-booking.
-- **Read replica:** Answers browsing queries so they do not compete with the seat updates.
-- **Queue and workers:** Do the slow jobs (create tickets and QR codes, send emails, free expired holds) outside the buyer's request.
-- **Payment provider:** An outside service that takes the card payment, so we never store card details.
-
-**How it survives the big sale:**
-- The CDN and cache absorb most of the 3,300 requests per second, and only holds and payments reach the primary database.
-- The waiting room caps how many buyers reach the write path at once.
-- Hold attempts (about 1,000 a second) are small updates to single rows, which a primary database can handle. Row-level locking means different seats do not block each other.
-- "Sold out" answers come from the cache, so the 180,000 unlucky buyers cost almost nothing.
-- Slow work and email run in the background, so a slow payment or email never holds a seat lock.
-- Each buyer is limited to 4 seats, and rate limits and CAPTCHA reduce bots.
-
+ 
+- **CDN:** serves images and public event pages near users, so most traffic never reaches our servers.
+- **Waiting room:** admits buyers at a rate the system can handle, keeping the sale fair and stable.
+- **Load balancer:** spreads requests over the app servers and skips failed ones.
+- **App servers:** run the API and business rules; stateless, so more can be added for a sale.
+- **Cache (Redis):** holds the seat map for 1 to 2 s and counts requests per user, so thousands of reads become one database read.
+- **Primary DB:** stores seats and orders and enforces the locks and constraints that stop double-booking.
+- **Read replica:** answers browsing queries so they never compete with seat updates.
+- **Queue and workers:** create tickets, send emails and free expired holds outside the buyer's request.
+- **Payment provider:** an external service that takes the payment, so we never store card data.
+**Surviving the sale:** the CDN and cache absorb most of the 3,300 requests per second; the waiting room limits how many buyers reach the write path; the 1,000 hold attempts per second are small single-row updates the primary can handle; "sold out" answers come from the cache; slow work runs in the background; each buyer is limited to 4 seats, with rate limits against bots.
+ 
 ## 7. Trade-offs
-
-- **Fairness vs. user experience (waiting room).** It protects the system and gives everyone a fair turn, but buyers must wait, which can be frustrating, and it adds a component to build and run.
-- **Hold time (fairness vs. seat usage).** A 5-minute hold gives people time to pay without losing their seat, but it keeps seats locked from others, and abandoned holds make a sale look sold out when it is not. A shorter hold frees seats faster but rushes buyers.
-- **Strong consistency vs. speed (database vs. cache).** Deciding seats only in the primary database guarantees correctness, but it is slower than using the cache. The cached seat map may be 1 to 2 seconds old, so a buyer can click a seat that was just taken and get a `409`. The app handles this with a clear message.
-- **One primary database vs. scale (simplicity vs. headroom).** A single primary keeps transactions simple and consistent, but all seat writes go to one place. For one event that is enough. If TicketHub grows to many simultaneous sales, we can split the data by event.
+ 
+- **Waiting room (fairness vs. experience):** it protects the system and gives everyone a fair turn, but buyers must wait and it is one more component to run.
+- **5-minute holds (fairness vs. seat usage):** buyers have time to pay, but abandoned holds keep seats locked, so an event can look sold out when it is not.
+- **Database decides, cache only displays (correctness vs. speed):** the seat map may be 1 to 2 s old, so a buyer can click a seat that was just taken and get a 409, which the app explains clearly.
+- **Single primary database (simplicity vs. headroom):** it keeps transactions simple, but all seat writes go to one place; that is enough for one sale, and data can be split by event later.
